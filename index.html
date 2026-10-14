@@ -204,6 +204,7 @@ textarea{resize:vertical;min-height:70px;line-height:1.45}
       <div class="meta-line" id="metaLine">Carregando biblioteca…</div>
     </div>
     <div class="top-actions">
+      <button class="btn" id="btnAccount" type="button">Conta</button>
       <button class="btn" id="btnCats" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h12M2 8h12M2 12h7"/></svg>Categorias</button>
       <button class="btn primary" id="btnAdd" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 3v10M3 8h10"/></svg>Adicionar artigo</button>
     </div>
@@ -245,11 +246,14 @@ textarea{resize:vertical;min-height:70px;line-height:1.45}
 <div class="toast" id="toast" hidden></div>
 <div id="dlgRoot"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 (() => {
 const TYPES = ["Revisão","Original","Ensaio clínico","Metanálise","Diretriz","Consenso","Protocolo","Outro"];
+const SUPABASE_URL = "https://qkrgnndyjytzlcxtkhsn.supabase.co";
+const SUPABASE_KEY = "sb_publishable_AqGZifKEVQztWJZRSphC9w_3A7Q7jub";
 const S = { articles:[], cats:[], aReady:false, cReady:false, q:"", cat:"all", type:"", year:null, sort:"year-desc",
-            open:new Set(), confirmDel:null, canWrite:true, db:null, mcp:null, noDb:false, dbErr:"" };
+            open:new Set(), confirmDel:null, canWrite:false, db:null, client:null, user:null, mcp:null, noDb:false, dbErr:"" };
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const norm = s => String(s ?? "").normalize("NFD").replace(/[̀-ͯ]/g,"").toLowerCase();
@@ -345,6 +349,7 @@ function sorted(list){
 function render(){
   renderMeta(); renderCats(); renderCharts(); renderToolbar(); renderList();
   $("btnAdd").disabled = !S.canWrite || !S.db; $("btnCats").disabled = !S.db;
+  $("btnAccount").textContent = S.user ? "Sair" : "Entrar";
 }
 function renderMeta(){
   const el = $("metaLine");
@@ -354,7 +359,7 @@ function renderMeta(){
   const range = ys.length ? `${Math.min(...ys)}–${Math.max(...ys)}` : "—";
   el.innerHTML = `<b>${S.articles.length}</b> artigos · <b>${S.cats.length}</b> categorias · publicados entre <b>${range}</b>`;
   const b = $("banner");
-  b.innerHTML = S.noDb ? "" : (!S.canWrite ? `<div class="banner">Você tem acesso de leitura. Para adicionar ou editar artigos, peça acesso de Contribuidor a quem compartilhou a biblioteca.</div>` : (S.dbErr ? `<div class="banner">${esc(S.dbErr)}</div>` : ""));
+  b.innerHTML = S.noDb ? "" : (!S.user ? `<div class="banner">Entre com sua conta para acessar sua biblioteca sincronizada.</div>` : (S.dbErr ? `<div class="banner">${esc(S.dbErr)}</div>` : ""));
 }
 function renderCats(){
   const counts = {}; let none = 0;
@@ -414,7 +419,7 @@ function renderToolbar(){
 }
 function renderList(){
   const L = $("list");
-  if (S.noDb){ L.innerHTML = `<div class="empty"><strong>Biblioteca indisponível aqui</strong>Abra esta página no claude.ai, com login, para ver e editar os artigos.</div>`; $("countLine").textContent=""; return; }
+  if (!S.user){ L.innerHTML = `<div class="empty"><strong>Entre para abrir sua biblioteca</strong>Use o botão “Entrar” para acessar os artigos sincronizados entre seus dispositivos.</div>`; $("countLine").textContent=""; return; }
   if (!S.aReady){ L.innerHTML = `<div class="empty"><strong>Carregando artigos…</strong>Os artigos salvos aparecem aqui em instantes.</div>`; return; }
   if (!S.articles.length){ L.innerHTML = `<div class="empty"><strong>Sua biblioteca está vazia</strong>Clique em “Adicionar artigo” e cole um DOI ou PMID para preencher os dados automaticamente.</div>`; $("countLine").textContent=""; return; }
   const list = sorted(S.articles.filter(a => matches(a)));
@@ -479,6 +484,7 @@ $("sort").addEventListener("change", e => { S.sort = e.target.value; try{localSt
 try { const s = localStorage.getItem("bib.sort"); if (s){ S.sort = s; $("sort").value = s; } } catch {}
 $("btnAdd").addEventListener("click", () => openArticleDialog(null));
 $("btnCats").addEventListener("click", openCatDialog);
+$("btnAccount").addEventListener("click", () => S.user ? signOut() : openAccountDialog());
 
 // tooltip
 const tip = $("tip");
@@ -489,9 +495,8 @@ document.addEventListener("focusin", e => { const el = e.target.closest("[data-t
 
 function writeErr(err){
   const c = err && err.code;
-  if (c === "invalid_argument"){ S.canWrite = false; render(); return "Sem permissão para editar esta biblioteca."; }
-  if (c === "quota_exceeded") return "Limite de armazenamento atingido. Exclua itens para liberar espaço.";
-  if (c === "resource_exhausted") return "Muitas alterações seguidas. Aguarde alguns segundos.";
+  if (c === "42501" || c === "invalid_argument"){ S.canWrite = false; render(); return "Sem permissão para editar esta biblioteca."; }
+  if (c === "42P01") return "O banco ainda não foi configurado. Execute o arquivo supabase-schema.sql no Supabase.";
   return "Não foi possível salvar agora. Tente de novo.";
 }
 
@@ -502,6 +507,20 @@ function mountDlg(html){
   $("dlgRoot").innerHTML = `<div class="scrim" id="scrim"><div class="dlg" role="dialog" aria-modal="true">${html}</div></div>`;
   $("scrim").addEventListener("mousedown", e => { if (e.target.id === "scrim") closeDlg(); });
   document.addEventListener("keydown", escClose);
+}
+function openAccountDialog(){
+  mountDlg(`<div class="dlg-h"><h2>Acessar biblioteca</h2><button class="icon-btn" type="button" id="dx" aria-label="Fechar">${ICON.x}</button></div>
+    <form id="authForm" novalidate><div class="dlg-b"><p class="note">Entre com a mesma conta em todos os dispositivos para manter sua biblioteca sincronizada.</p>
+      <div class="fgrid"><label class="fld s6"><span>E-mail</span><input id="authEmail" type="email" autocomplete="email" required></label><label class="fld s6"><span>Senha</span><input id="authPassword" type="password" autocomplete="current-password" minlength="6" required></label></div>
+      <div class="msg status" id="authMsg" role="status"></div></div>
+    <div class="dlg-f"><button class="btn ghost" type="button" id="dc">Cancelar</button><button class="btn" type="button" id="signUp">Criar conta</button><button class="btn primary" type="submit">Entrar</button></div></form>`);
+  $("dx").onclick = closeDlg; $("dc").onclick = closeDlg;
+  const credentials = () => ({ email: $("authEmail").value.trim(), password: $("authPassword").value });
+  $("authForm").onsubmit = async e => { e.preventDefault(); const {email,password} = credentials(); setMsg("authMsg","Entrando…"); const {error} = await S.client.auth.signInWithPassword({email,password}); if(error) return setMsg("authMsg",error.message,"err"); closeDlg(); await loadLibrary(); };
+  $("signUp").onclick = async () => { const {email,password} = credentials(); if(!email || password.length < 6) return setMsg("authMsg","Informe um e-mail e uma senha de ao menos 6 caracteres.","err"); setMsg("authMsg","Criando conta…"); const {data,error} = await S.client.auth.signUp({email,password}); if(error) return setMsg("authMsg",error.message,"err"); if(!data.session) return setMsg("authMsg","Confira seu e-mail para confirmar a conta e depois entre.","ok"); closeDlg(); await loadLibrary(); };
+}
+async function signOut(){
+  await S.client.auth.signOut(); S.user=null; S.canWrite=false; S.articles=[]; S.cats=[]; S.aReady=S.cReady=false; render();
 }
 function openCopyFallback(txt){
   mountDlg(`<div class="dlg-h"><h2>Referência</h2><button class="icon-btn" type="button" id="dx">${ICON.x}</button></div>
@@ -563,8 +582,8 @@ function openArticleDialog(a){
     };
     $("fs").disabled = true; setMsg("saveMsg","Salvando…");
     try {
-      const id = ed ? a.id : (pmid ? "pmid-" + pmid : undefined);
-      const ref = id ? S.db.doc("articles/" + id) : S.db.collection("articles").doc();
+      const id = ed ? a.id : crypto.randomUUID();
+      const ref = S.db.doc("articles/" + id);
       await ref.set(doc);
       closeDlg(); toast(ed ? "Alterações salvas" : "Artigo adicionado");
     } catch(err){ $("fs").disabled = false; setMsg("saveMsg", writeErr(err), "err"); }
@@ -683,22 +702,40 @@ function openCatDialog(){
 
 /* ---------- boot ---------- */
 render();
+async function loadLibrary(){
+  const {data: sessionData} = await S.client.auth.getSession();
+  S.user = sessionData.session?.user || null;
+  S.canWrite = !!S.user;
+  if (!S.user){ S.articles=[]; S.cats=[]; S.aReady=S.cReady=false; render(); return; }
+  const [cats, articles] = await Promise.all([
+    S.client.from("categories").select("id,data").order("created_at"),
+    S.client.from("articles").select("id,data").order("created_at")
+  ]);
+  if (cats.error || articles.error){ S.dbErr = writeErr(cats.error || articles.error); S.aReady=S.cReady=true; render(); return; }
+  S.dbErr = "";
+  S.cats = cats.data.map(row => ({id:row.id, ...(row.data || {})})).sort((a,b) => (a.order ?? 0) - (b.order ?? 0) || String(a.name).localeCompare(b.name,"pt"));
+  S.articles = articles.data.map(row => ({id:row.id, ...(row.data || {})}));
+  S.aReady=S.cReady=true; render();
+}
+function makeDb(){
+  const doc = path => {
+    const [table,id] = path.split("/");
+    const current = () => (table === "articles" ? S.articles : S.cats).find(item => item.id === id) || {};
+    return {
+      async set(data){ const {error} = await S.client.from(table).upsert({id,data},{onConflict:"id"}); if(error) throw error; await loadLibrary(); },
+      async update(data){ const old = current(); const {id:ignored,...merged} = {...old,...data}; const {error} = await S.client.from(table).update({data:merged}).eq("id",id); if(error) throw error; await loadLibrary(); },
+      async delete(){ const {error} = await S.client.from(table).delete().eq("id",id); if(error) throw error; await loadLibrary(); }
+    };
+  };
+  return {doc, collection: table => ({doc: () => doc(`${table}/${crypto.randomUUID()}`)})};
+}
 (async () => {
-  const use = window.claude && window.claude.use ? n => window.claude.use(n) : async () => null;
-  const db = await use("db");
-  if (!db){ S.noDb = true; render(); return; }
-  S.db = db;
-  db.collection("categories").onSnapshot(s => {
-    S.cats = s.docs.map(d => ({ id:d.id, ...d.data() })).sort((a,b) => (a.order ?? 0) - (b.order ?? 0) || String(a.name).localeCompare(b.name,"pt"));
-    S.cReady = true; render();
-  }, e => { S.dbErr = "As categorias não puderam ser carregadas. Recarregue a página."; render(); });
-  db.collection("articles").onSnapshot(s => {
-    S.articles = s.docs.map(d => ({ id:d.id, ...d.data() }));
-    S.aReady = true; render();
-  }, e => { S.dbErr = "Os artigos não puderam ser carregados. Recarregue a página."; S.aReady = true; render(); });
-  render();
-  use("user").then(async u => { if (!u) return; try { const c = await u.can("data.write"); if (c === false){ S.canWrite = false; render(); } } catch {} });
-  use("mcp").then(m => { S.mcp = m; });
+  if (!window.supabase){ S.dbErr="Não foi possível carregar o serviço de sincronização."; render(); return; }
+  S.client = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  S.db = makeDb();
+  S.client.auth.onAuthStateChange(() => loadLibrary());
+  await loadLibrary();
+  setInterval(() => { if (document.visibilityState === "visible" && S.user) loadLibrary(); }, 30000);
 })();
 })();
 </script>
