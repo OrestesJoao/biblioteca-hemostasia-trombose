@@ -563,7 +563,7 @@ function openArticleDialog(a){
   $("dx").onclick = closeDlg; $("dc").onclick = closeDlg;
   $("lkBtn").onclick = () => doLookup();
   $("lk").addEventListener("keydown", e => { if (e.key === "Enter"){ e.preventDefault(); doLookup(); } });
-  if (!S.mcp) { $("lkMsg").textContent = "A busca automática precisa do conector PubMed ativo no seu claude.ai. Você ainda pode preencher os campos à mão."; }
+  $("lkMsg").textContent = "Busca gratuita via PubMed (PMID) e Crossref (DOI). Revise os dados antes de salvar.";
   (ed ? $("f_title") : $("lk")).focus();
   $("fa").addEventListener("submit", async e => {
     e.preventDefault();
@@ -578,7 +578,7 @@ function openArticleDialog(a){
       type: $("f_type").value, categories: [...document.querySelectorAll('input[name="fc"]:checked')].map(i => i.value),
       keywords: v("f_kw").split(",").map(s => s.trim()).filter(Boolean).slice(0,20),
       notes: $("f_notes").value.trim(), abstract: $("f_abstract").value.trim(),
-      addedAt: a.addedAt || new Date().toISOString(), updatedAt: new Date().toISOString(), source: a.source || (lastLookup ? "PubMed" : "Manual")
+      addedAt: a.addedAt || new Date().toISOString(), updatedAt: new Date().toISOString(), source: a.source || (lastLookup ? lastLookup.source : "Manual")
     };
     $("fs").disabled = true; setMsg("saveMsg","Salvando…");
     try {
@@ -592,54 +592,47 @@ function openArticleDialog(a){
 
   async function doLookup(){
     const raw = $("lk").value.trim(); if (!raw){ $("lk").focus(); return; }
-    if (!S.mcp){ setMsg("lkMsg","Busca indisponível: ative o conector PubMed no claude.ai (Configurações → Conectores).","err"); return; }
-    $("lkBtn").disabled = true; setMsg("lkMsg","Consultando o PubMed…");
+    $("lkBtn").disabled = true; setMsg("lkMsg","Buscando dados bibliográficos…");
     try {
-      let pmid = null; const doi = cleanDoi(raw);
-      if (/^\d{4,9}$/.test(raw.replace(/\s|pmid:?/gi,""))) pmid = raw.replace(/\D/g,"");
-      else if (doi){
-        for (const q of [`${doi}[AID]`, `"${doi}"`]){
-          const r = await S.mcp.callTool("PubMed","search_articles",{ query:q, max_results:2 });
-          const ids = r.payload && r.payload.pmids; if (ids && ids.length){ pmid = String(ids[0]); break; }
-        }
-        if (!pmid){ setMsg("lkMsg","Nenhum registro no PubMed para esse DOI. Confira o DOI ou preencha à mão.","err"); return; }
-      } else { setMsg("lkMsg","Formato não reconhecido. Use um DOI (10.xxxx/…) ou um PMID numérico.","err"); return; }
-      const r = await S.mcp.callTool("PubMed","get_article_metadata",{ pmids:[pmid] });
-      const art = r.payload && r.payload.articles && r.payload.articles[0];
-      if (!art){ setMsg("lkMsg",`PMID ${pmid} não encontrado.`,"err"); return; }
+      const pmid = raw.replace(/^pmid\s*:\s*/i,"").trim();
+      const doi = cleanDoi(raw);
+      let art;
+      if (/^\d{4,9}$/.test(pmid)) art = await lookupPubMed(pmid);
+      else if (doi) art = await lookupCrossref(doi);
+      else { setMsg("lkMsg","Formato não reconhecido. Use um DOI (10.xxxx/…) ou um PMID numérico.","err"); return; }
       fillFrom(art); lastLookup = art;
-      const dup = S.articles.find(x => x.id !== a.id && (x.pmid === String(art.identifiers?.pmid||"")));
-      setMsg("lkMsg", dup ? "Dados preenchidos. Atenção: este artigo já está na biblioteca." : "Dados preenchidos a partir do PubMed. Revise, escolha as categorias e salve.", dup ? "err" : "ok");
-    } catch(err){ setMsg("lkMsg", mcpErr(err), "err"); }
+      const dup = S.articles.find(x => x.id !== a.id && ((art.pmid && x.pmid === art.pmid) || (art.doi && x.doi && x.doi.toLowerCase() === art.doi.toLowerCase())));
+      setMsg("lkMsg", dup ? "Dados preenchidos. Atenção: este artigo já está na biblioteca." : `Dados preenchidos via ${art.source}. Revise, escolha as categorias e salve.`, dup ? "err" : "ok");
+    } catch(err){ setMsg("lkMsg", err.message || "Não foi possível localizar o artigo. Confira o identificador ou preencha à mão.", "err"); }
     finally { const b = $("lkBtn"); if (b) b.disabled = false; }
   }
 }
 function cleanDoi(s){ const m = String(s||"").match(/10\.\d{4,9}\/[^\s"<>]+/); return m ? m[0].replace(/[.,;)\]]+$/,"") : ""; }
 function setMsg(id, m, cls){ const el = $(id); if (!el) return; el.textContent = m; el.className = (id==="saveMsg"?"msg ":"") + "status" + (cls ? " " + cls : ""); }
-function mcpErr(e){
-  switch (e && e.code){
-    case "needs_reauth": return "Reconecte o PubMed em claude.ai → Configurações → Conectores.";
-    case "server_not_connected": return "Adicione o conector PubMed em claude.ai → Configurações → Conectores.";
-    case "not_in_manifest": case "approval_required": case "consent_required": return "A busca precisa da sua permissão para usar o PubMed nesta página. Clique em Buscar de novo e permita.";
-    case "server_unavailable": case "rate_limited": return "O PubMed não respondeu agora. Tente em alguns segundos.";
-    case "tool_error": return "O PubMed recusou a consulta. Confira o identificador.";
-    default: return "Não foi possível consultar o PubMed. Preencha os campos à mão.";
-  }
+async function lookupPubMed(pmid){
+  const url = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=${encodeURIComponent(pmid)}&retmode=json`;
+  const response = await fetch(url); if (!response.ok) throw new Error("O PubMed não respondeu agora. Tente novamente em alguns segundos.");
+  const item = (await response.json()).result?.[pmid]; if (!item || item.error) throw new Error(`PMID ${pmid} não encontrado.`);
+  const ids = Object.fromEntries((item.articleids || []).map(x => [x.idtype, x.value]));
+  return { source:"PubMed", title:item.title, authors:(item.authors||[]).map(x => x.name).join(", "), journal:item.fulljournalname || item.source, year:(item.pubdate||"").match(/\b(19|20)\d{2}\b/)?.[0], volume:item.volume, issue:item.issue, pages:item.pages, pmid:String(pmid), doi:ids.doi || "", abstract:"", type:pubMedType(item.sortfirstauthor, item.pubtype) };
 }
+async function lookupCrossref(doi){
+  const response = await fetch(`https://api.crossref.org/works/${encodeURIComponent(doi)}`, {headers:{Accept:"application/json"}});
+  if (!response.ok) throw new Error("DOI não encontrado no Crossref. Confira o código ou tente um PMID.");
+  const item = (await response.json()).message;
+  const year = item.published?.["date-parts"]?.[0]?.[0] || item.issued?.["date-parts"]?.[0]?.[0] || "";
+  return { source:"Crossref", title:item.title?.[0] || "", authors:(item.author||[]).map(x => [x.family,x.given].filter(Boolean).join(" ")).join(", "), journal:item["container-title"]?.[0] || "", year, volume:item.volume || "", issue:item.issue || "", pages:item.page || "", pmid:"", doi:item.DOI || doi, abstract:(item.abstract || "").replace(/<[^>]+>/g,""), type:crossrefType(item.type, item.subtype) };
+}
+function pubMedType(_author, types){ const t = (types||[]).join(" ").toLowerCase(); return t.includes("meta-analysis") ? "Metanálise" : t.includes("guideline") ? "Diretriz" : t.includes("consensus") ? "Consenso" : t.includes("clinical trial") ? "Ensaio clínico" : t.includes("review") ? "Revisão" : "Original"; }
+function crossrefType(type, subtype){ const t = `${type||""} ${subtype||""}`.toLowerCase(); return t.includes("review") ? "Revisão" : "Original"; }
 function fillFrom(art){
-  const ids = art.identifiers || {}, c = art.citation || {}, t = art.article_types || [];
-  const au = (art.authors||[]).map(x => x.last_name ? `${x.last_name} ${x.initials||""}`.trim() : (x.collective_name || x.name || "")).filter(Boolean).join(", ");
-  const typ = t.includes("Meta-Analysis") ? "Metanálise" : t.includes("Practice Guideline") || t.includes("Guideline") ? "Diretriz" : t.includes("Consensus Statement") ? "Consenso" : (t.includes("Randomized Controlled Trial") || t.includes("Clinical Trial")) ? "Ensaio clínico" : (t.includes("Review") || t.includes("Systematic Review")) ? "Revisão" : "Original";
   const set = (id, v) => { const el = $(id); if (el && v != null && v !== "") el.value = v; };
   set("f_title", String(art.title||"").replace(/\.$/,""));
-  set("f_authors", au);
-  set("f_journal", art.journal && (art.journal.iso_abbreviation || art.journal.title));
-  set("f_year", art.publication_date && art.publication_date.year);
-  set("f_volume", c.volume); set("f_issue", c.issue); set("f_pages", c.pages);
-  set("f_pmid", ids.pmid); set("f_doi", ids.doi || art.doi);
-  set("f_kw", (art.keywords||[]).slice(0,10).join(", "));
+  set("f_authors", art.authors); set("f_journal", art.journal); set("f_year", art.year);
+  set("f_volume", art.volume); set("f_issue", art.issue); set("f_pages", art.pages);
+  set("f_pmid", art.pmid); set("f_doi", art.doi);
   set("f_abstract", art.abstract);
-  $("f_type").value = typ;
+  $("f_type").value = art.type || "Original";
 }
 
 function openCatDialog(){
